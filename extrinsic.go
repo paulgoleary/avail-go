@@ -16,7 +16,8 @@ import (
 type ExtrinsicExecutor struct {
 	Connection
 
-	kp signature.KeyringPair
+	kp    signature.KeyringPair
+	appId AppID
 
 	genesisHash types.Hash
 	rv          *types.RuntimeVersion
@@ -29,11 +30,12 @@ type ExtrinsicExecutor struct {
 // It also provides locking 'nonce management' - that is, an explicit local lock around retrieving and using the nonce
 //  for the provided account. This has proven useful in some scenarios to avoid race conditions that result in transaction
 //  failures, particularly when server-side code has to submit many transactions using the same account.
-func MakeExtrinsicExecutor(conn *Connection, kp signature.KeyringPair) (em *ExtrinsicExecutor, err error) {
+func MakeExtrinsicExecutor(conn *Connection, kp signature.KeyringPair, appId AppID) (em *ExtrinsicExecutor, err error) {
 
 	em = &ExtrinsicExecutor{
 		Connection:       *conn,
 		kp:               kp,
+		appId:            appId,
 		transMtx:         sync.Mutex{},
 		lastPendingNonce: math.MaxUint32,
 	}
@@ -84,7 +86,7 @@ func NewCallArgs(m *types.Metadata, call string, args []interface{}) (types.Call
 	return types.Call{c, a}, nil
 }
 
-func (em *ExtrinsicExecutor) execPrelude(forWait bool, callName string, callArgs []interface{}) (sub *author.ExtrinsicStatusSubscription, err error) {
+func (em *ExtrinsicExecutor) execPrelude(appId AppID, forWait bool, callName string, callArgs []interface{}) (sub *author.ExtrinsicStatusSubscription, err error) {
 
 	em.transMtx.Lock() // lock needs to be released after the exec function is called but *before* waiting...
 	defer em.transMtx.Unlock()
@@ -99,7 +101,7 @@ func (em *ExtrinsicExecutor) execPrelude(forWait bool, callName string, callArgs
 	if checkEncode, err = types.EncodeToBytes(c); err != nil {
 		return
 	} else {
-		println(hex.EncodeToString(checkEncode))
+		LogDebug(fmt.Sprintf("encoded extrinsic %v", hex.EncodeToString(checkEncode)))
 	}
 
 	var nonce uint32
@@ -115,6 +117,7 @@ func (em *ExtrinsicExecutor) execPrelude(forWait bool, callName string, callArgs
 		Tip:                types.NewUCompactFromUInt(0),
 		SpecVersion:        em.rv.SpecVersion,
 		TransactionVersion: em.rv.TransactionVersion,
+		AppID:              types.U32(appId),
 	}
 
 	ext := types.NewExtrinsic(c)
@@ -239,14 +242,14 @@ func (em *ExtrinsicExecutor) processBlockEvents(blockHash types.Hash, proc func(
 }
 
 func (em *ExtrinsicExecutor) ExecNoWait(callName string, callArgs ...interface{}) (err error) {
-	_, err = em.execPrelude(false, callName, callArgs)
+	_, err = em.execPrelude(em.appId, false, callName, callArgs)
 	return
 }
 
 func (em *ExtrinsicExecutor) ExecWait(callName string, checkFailure bool, callArgs ...interface{}) (retHash types.Hash, err error) {
 
 	var sub *author.ExtrinsicStatusSubscription
-	if sub, err = em.execPrelude(true, callName, callArgs); err != nil {
+	if sub, err = em.execPrelude(em.appId, true, callName, callArgs); err != nil {
 		return
 	} else {
 		defer sub.Unsubscribe()
@@ -260,6 +263,7 @@ func (em *ExtrinsicExecutor) ExecWait(callName string, checkFailure bool, callAr
 			}
 		}
 
+		LogDebug(fmt.Sprintf("returned block hash %v", retHash.Hex()))
 		if checkFailure {
 			events := AvailEventRecords{}
 			proc := func(raw types.EventRecordsRaw) error {
